@@ -1,0 +1,203 @@
+import pandas as pd
+import nltk
+from nltk.corpus import stopwords
+import string
+import re
+
+nltk.download('stopwords')
+
+# Load dataset
+df = pd.read_csv("Dataset.csv") 
+
+# Display basic info
+print(df.head())
+
+# Function to clean text
+def preprocess(text):
+    text = text.lower()  # Lowercase
+    text = re.sub(r'\d+', '', text)  # Remove numbers
+    text = text.translate(str.maketrans('', '', string.punctuation))  # Remove punctuation
+    text = text.strip()  # Remove extra spaces
+    text = " ".join([word for word in text.split() if word not in stopwords.words('english')])  # Remove stopwords
+    return text
+
+# Apply preprocessing to title column
+df['cleaned_title'] = df['title'].apply(preprocess)
+
+# Show processed data
+print(df[['title', 'cleaned_title']].head())
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+# Initialize TF-IDF Vectorizer 
+tfidf = TfidfVectorizer(max_features=5000, stop_words='english')
+
+# Transform the cleaned title text
+X_text = tfidf.fit_transform(df['cleaned_title'])
+
+# Convert to DataFrame
+X_text_df = pd.DataFrame(X_text.toarray(), columns=tfidf.get_feature_names_out())
+
+# Show the transformed features
+print("TF-IDF Matrix Shape:", X_text_df.shape)
+print("Sample Features:", X_text_df.columns[:10].tolist())  # Show first 10 feature names
+
+from sklearn.preprocessing import OneHotEncoder
+
+# Initialize OneHotEncoder
+encoder = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
+
+# Transform the 'source_domain' column
+X_domain = encoder.fit_transform(df[['source_domain']])
+
+# Convert to DataFrame
+X_domain_df = pd.DataFrame(X_domain, columns=encoder.get_feature_names_out(['source_domain']))
+
+# Show shape of transformed data
+print("One-Hot Encoded Shape:", X_domain_df.shape)
+print("Sample Encoded Features:", X_domain_df.columns[:10].tolist())  # Show first 10 feature names
+
+from sklearn.preprocessing import StandardScaler
+
+# Initialize StandardScaler
+scaler = StandardScaler()
+
+# Transform the 'tweet_num' column
+X_tweet = scaler.fit_transform(df[['tweet_num']])
+
+# Convert to DataFrame
+X_tweet_df = pd.DataFrame(X_tweet, columns=['tweet_num_scaled'])
+
+# Show first 5 values
+print(X_tweet_df.head())
+
+import scipy.sparse as sp
+
+# Convert DataFrames to sparse matrices
+X_tfidf_sparse = sp.csr_matrix(X_text_df)  # TF-IDF features
+X_source_sparse = sp.csr_matrix(X_domain_df)  # One-Hot Encoded source domains
+X_tweet_sparse = sp.csr_matrix(X_tweet_df)  # Reshape for compatibility
+
+# Concatenate all feature matrices
+X_final = sp.hstack([X_tfidf_sparse, X_source_sparse, X_tweet_sparse])
+
+# Check the final shape
+print("Final Feature Matrix Shape:", X_final.shape)
+
+
+from sklearn.model_selection import train_test_split
+
+# Define target variable
+y = df['real']  # 1 for real news, 0 for fake news
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(X_final, y, test_size=0.2, random_state=42, stratify=y)
+
+# Check the shapes
+print("Train Feature Shape:", X_train.shape)
+print("Test Feature Shape:", X_test.shape)
+print("Train Target Distribution:\n", y_train.value_counts(normalize=True))
+print("Test Target Distribution:\n", y_test.value_counts(normalize=True))
+
+from sklearn.model_selection import RandomizedSearchCV
+
+# Define hyperparameter grid for Random Forest
+rf_params = {
+    'n_estimators': [50, 100, 200],
+    'max_depth': [None, 10, 20, 30],
+    'min_samples_split': [2, 5, 10],
+    'min_samples_leaf': [1, 2, 4]
+}
+
+# Define hyperparameter grid for XGBoost
+xgb_params = {
+    'n_estimators': [50, 100, 200],
+    'max_depth': [3, 6, 9],
+    'learning_rate': [0.01, 0.1, 0.2],
+    'subsample': [0.7, 0.8, 1.0]
+}
+
+# Initialize models
+rf = RandomForestClassifier(random_state=42, n_jobs=-1)
+xgb_model = xgb.XGBClassifier(random_state=42, n_jobs=-1)
+
+# Perform RandomizedSearchCV
+rf_search = RandomizedSearchCV(rf, rf_params, n_iter=10, cv=3, scoring='accuracy', random_state=42, n_jobs=-1)
+xgb_search = RandomizedSearchCV(xgb_model, xgb_params, n_iter=10, cv=3, scoring='accuracy', random_state=42, n_jobs=-1)
+
+# Fit the models
+rf_search.fit(X_train, y_train)
+xgb_search.fit(X_train, y_train)
+
+# Best parameters
+print("Best RF Params:", rf_search.best_params_)
+print("Best XGB Params:", xgb_search.best_params_)
+
+from sklearn.ensemble import StackingClassifier
+from sklearn.linear_model import LogisticRegression
+
+# Define the optimized base models
+rf_best = RandomForestClassifier(
+    n_estimators=100,
+    max_depth=None,
+    min_samples_split=5,
+    min_samples_leaf=1,
+    random_state=42,
+    n_jobs=-1
+)
+
+xgb_best = xgb.XGBClassifier(
+    n_estimators=200,
+    max_depth=6,
+    learning_rate=0.2,
+    subsample=0.8,
+    random_state=42,
+    n_jobs=-1
+)
+
+# Define the stacking model
+stacking_clf_best = StackingClassifier(
+    estimators=[('rf', rf_best), ('xgb', xgb_best)],
+    final_estimator=LogisticRegression(),
+    n_jobs=-1
+)
+
+# Train the optimized stacking model
+stacking_clf_best.fit(X_train, y_train)
+
+# Evaluate on test set
+y_pred_stacking_best = stacking_clf_best.predict(X_test)
+
+# Print accuracy and classification report
+from sklearn.metrics import accuracy_score, classification_report
+
+stacking_best_accuracy = accuracy_score(y_test, y_pred_stacking_best)
+print("Optimized Stacking Model Accuracy:", stacking_best_accuracy)
+print("\nClassification Report:\n", classification_report(y_test, y_pred_stacking_best))
+
+
+Optimized Stacking Model Accuracy: 0.8941810344827587
+
+Classification Report:
+               precision    recall  f1-score   support
+
+           0       0.84      0.71      0.77      1151
+           1       0.91      0.95      0.93      3489
+
+    accuracy                           0.89      4640
+   macro avg       0.87      0.83      0.85      4640
+weighted avg       0.89      0.89      0.89      4640
+
+
+from sklearn.model_selection import cross_val_score
+
+# Perform 5-fold cross-validation
+cv_scores = cross_val_score(stacking_clf_best, X_train, y_train, cv=5, scoring='accuracy')
+
+print("Cross-Validation Accuracy Scores:", cv_scores)
+print("Mean CV Accuracy:", cv_scores.mean())
+print("Standard Deviation of CV Scores:", cv_scores.std())
+
+Cross-Validation Accuracy Scores: [0.89655172 0.89032606 0.88978712 0.90379951 0.88870924]
+Mean CV Accuracy: 0.8938347317852795
+Standard Deviation of CV Scores: 0.005685834130462353
